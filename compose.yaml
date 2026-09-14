@@ -1,0 +1,103 @@
+name: ${COMPOSE_PROJECT_NAME:-eprom-crm}
+
+services:
+  crm:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: eprom-crm:${CRM_IMAGE_TAG:-local}
+    environment:
+      NODE_ENV: production
+      PORT: "4310"
+      CRM_HOST: 0.0.0.0
+      CRM_DATA_DIR: /app/data
+      CRM_SECURE_COOKIE: "true"
+      CRM_SETUP_TOKEN: ${CRM_SETUP_TOKEN:?Ustaw CRM_SETUP_TOKEN w prywatnym pliku .env}
+      CRM_TIMEZONE: ${CRM_TIMEZONE:-Europe/Warsaw}
+      TZ: ${CRM_TIMEZONE:-Europe/Warsaw}
+      CRM_TRUST_PROXY: cloudflare
+      CRM_ALLOWED_ORIGINS: ${CRM_ALLOWED_ORIGINS:-https://crm.webspanner.pl}
+    volumes:
+      - type: bind
+        source: ./data
+        target: /app/data
+    expose:
+      - "4310"
+    # Lokalny podglad pozostaje dostepny tylko z hosta. Ten blok mozna usunac
+    # po uruchomieniu tunelu, aby CRM nie publikowal zadnego portu na hoście.
+    ports:
+      - name: crm-local
+        target: 4310
+        published: "${CRM_LOCAL_PORT:-4320}"
+        host_ip: 127.0.0.1
+        protocol: tcp
+    networks:
+      - crm_private
+    init: true
+    user: "1000:1000"
+    read_only: true
+    tmpfs:
+      - /tmp:size=32m,mode=1777,nosuid,nodev,noexec
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 200
+    restart: unless-stopped
+    stop_grace_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+
+  cloudflare-tunnel:
+    image: ${CLOUDFLARED_IMAGE:-cloudflare/cloudflared:2026.9.1}
+    command:
+      - tunnel
+      - --no-autoupdate
+      - --loglevel
+      - info
+      - run
+      - --token-file
+      - /run/secrets/cloudflare_tunnel_token
+    environment:
+      TUNNEL_TRANSPORT_PROTOCOL: ${CLOUDFLARE_TUNNEL_PROTOCOL:-auto}
+    depends_on:
+      crm:
+        condition: service_healthy
+    secrets:
+      - source: cloudflare_tunnel_token
+        target: cloudflare_tunnel_token
+        # W kontenerze działa wyłącznie nieuprzywilejowany użytkownik cloudflared.
+        # Plik na hoście nadal powinien być dostępny tylko dla administratora.
+        mode: 0444
+    networks:
+      - crm_private
+      - tunnel_egress
+    init: true
+    user: "65532:65532"
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777,nosuid,nodev,noexec
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 100
+    restart: unless-stopped
+    stop_grace_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+
+networks:
+  crm_private:
+    internal: true
+  tunnel_egress: {}
+
+secrets:
+  cloudflare_tunnel_token:
+    file: ${CLOUDFLARE_TUNNEL_TOKEN_FILE:-./secrets/cloudflare-tunnel-token}

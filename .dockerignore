@@ -1,0 +1,19 @@
+# Allowlist: only the standalone CRM application enters the build context.
+*
+
+!Dockerfile
+!.dockerignore
+!package.json
+!package-lock.json
+!index.html
+!vite.config.ts
+!tsconfig.json
+!tsconfig.app.json
+!tsconfig.node.json
+
+!public/
+!public/**
+!src/
+!src/**
+!server/
+!server/**
