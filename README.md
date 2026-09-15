@@ -18,8 +18,8 @@ Domyślny adres serwera to `http://127.0.0.1:4310`. Dane są zapisywane w `data/
 
 1. Skopiuj `.env.example` do prywatnego pliku `.env`.
 2. Ustaw w nim długi, losowy `CRM_SETUP_TOKEN`.
-3. Utwórz plik `secrets/cloudflare-tunnel-token` z tokenem dedykowanego tunelu `eprom-crm`.
-4. W Cloudflare ustaw trasę `crm.webspanner.pl` do usługi `http://crm:4310`.
+3. Umieść poświadczenie dedykowanego tunelu `eprom-crm` w prywatnym pliku `secrets/eprom-crm.json`.
+4. Tunel korzysta z `cloudflared.docker.yml` i kieruje wyłącznie `crm.webspanner.pl` do usługi `http://crm:4310`.
 5. Uruchom `START-CRM-DOCKER.cmd` albo:
 
 ```powershell
@@ -30,7 +30,9 @@ Stack publikuje podgląd lokalny tylko na `127.0.0.1:4320`. Publiczny ruch przec
 
 ## Awaryjny start bez kontenera
 
-Podpisana binarka `tools/cloudflared.exe` i plik tokenu nie są przechowywane w Git. Na przygotowanym komputerze można uruchomić `START-CRM-PUBLIC.cmd`; skrypt uruchamia CRM na `127.0.0.1:4320` i tunel w jednym oknie.
+Podpisana binarka `tools/cloudflared.exe` i plik poświadczenia tunelu nie są przechowywane w Git. Na przygotowanym komputerze można uruchomić `START-CRM-PUBLIC.cmd`; skrypt uruchamia CRM na `127.0.0.1:4320`, używa `cloudflared.host.yml` i utrzymuje tunel w tym samym oknie.
+
+Obie konfiguracje wskazują wyłącznie nowy tunel `eprom-crm` (`b3876616-07e7-4f87-a646-301c43af1776`). Nie korzystają z tunelu ani ustawień komunikatora.
 
 Nie uruchamiaj jednocześnie wariantu natywnego i kontenera, ponieważ oba zapisywałyby tę samą bazę SQLite.
 

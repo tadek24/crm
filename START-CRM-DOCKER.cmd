@@ -10,8 +10,13 @@ if not exist ".env" (
   pause
   exit /b 1
 )
-if not exist "secrets\cloudflare-tunnel-token" (
-  echo Brakuje prywatnego pliku secrets\cloudflare-tunnel-token.
+if not exist "secrets\eprom-crm.json" (
+  echo Brakuje prywatnego pliku secrets\eprom-crm.json.
+  pause
+  exit /b 1
+)
+if not exist "cloudflared.docker.yml" (
+  echo Brakuje konfiguracji cloudflared.docker.yml.
   pause
   exit /b 1
 )

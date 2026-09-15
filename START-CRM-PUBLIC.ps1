@@ -1,12 +1,16 @@
 $ErrorActionPreference = 'Stop'
 
 $appRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
-$tokenFile = Join-Path $appRoot 'secrets\cloudflare-tunnel-token'
+$credentialsFile = Join-Path $appRoot 'secrets\eprom-crm.json'
+$configFile = Join-Path $appRoot 'cloudflared.host.yml'
 $cloudflared = Join-Path $appRoot 'tools\cloudflared.exe'
 $healthUrl = 'http://127.0.0.1:4320/api/health'
 
-if (-not (Test-Path -LiteralPath $tokenFile)) {
-  throw 'Brakuje prywatnego pliku secrets\cloudflare-tunnel-token.'
+if (-not (Test-Path -LiteralPath $credentialsFile)) {
+  throw 'Brakuje prywatnego pliku secrets\eprom-crm.json.'
+}
+if (-not (Test-Path -LiteralPath $configFile)) {
+  throw 'Brakuje konfiguracji cloudflared.host.yml.'
 }
 if (-not (Test-Path -LiteralPath $cloudflared)) {
   throw 'Brakuje podpisanej binarki tools\cloudflared.exe.'
@@ -62,7 +66,12 @@ try {
 
   Write-Host 'CRM dziala publicznie pod https://crm.webspanner.pl'
   Write-Host 'Pozostaw to okno otwarte. Ctrl+C zatrzyma tunel i CRM.'
-  & $cloudflared tunnel --no-autoupdate --loglevel info run --token-file $tokenFile
+  Push-Location $appRoot
+  try {
+    & $cloudflared tunnel --config $configFile --no-autoupdate --loglevel info run
+  } finally {
+    Pop-Location
+  }
 } finally {
   if ($server -and -not $server.HasExited) {
     Stop-Process -Id $server.Id -ErrorAction SilentlyContinue

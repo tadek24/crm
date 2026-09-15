@@ -1,0 +1,7 @@
+tunnel: b3876616-07e7-4f87-a646-301c43af1776
+credentials-file: ./secrets/eprom-crm.json
+
+ingress:
+  - hostname: crm.webspanner.pl
+    service: http://127.0.0.1:4320
+  - service: http_status:404

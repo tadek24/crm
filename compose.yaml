@@ -55,23 +55,28 @@ services:
     image: ${CLOUDFLARED_IMAGE:-cloudflare/cloudflared:2026.9.1}
     command:
       - tunnel
+      - --config
+      - /etc/cloudflared/config.yml
       - --no-autoupdate
       - --loglevel
       - info
       - run
-      - --token-file
-      - /run/secrets/cloudflare_tunnel_token
     environment:
       TUNNEL_TRANSPORT_PROTOCOL: ${CLOUDFLARE_TUNNEL_PROTOCOL:-auto}
     depends_on:
       crm:
         condition: service_healthy
     secrets:
-      - source: cloudflare_tunnel_token
-        target: cloudflare_tunnel_token
+      - source: cloudflare_tunnel_credentials
+        target: eprom-crm.json
         # W kontenerze działa wyłącznie nieuprzywilejowany użytkownik cloudflared.
         # Plik na hoście nadal powinien być dostępny tylko dla administratora.
         mode: 0444
+    volumes:
+      - type: bind
+        source: ./cloudflared.docker.yml
+        target: /etc/cloudflared/config.yml
+        read_only: true
     networks:
       - crm_private
       - tunnel_egress
@@ -99,5 +104,5 @@ networks:
   tunnel_egress: {}
 
 secrets:
-  cloudflare_tunnel_token:
-    file: ${CLOUDFLARE_TUNNEL_TOKEN_FILE:-./secrets/cloudflare-tunnel-token}
+  cloudflare_tunnel_credentials:
+    file: ${CLOUDFLARE_TUNNEL_CREDENTIALS_FILE:-./secrets/eprom-crm.json}
