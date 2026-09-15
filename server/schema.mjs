@@ -193,4 +193,35 @@ export function migrate(db) {
       PRAGMA optimize;
     `)
   })
+
+  runMigration(db, 5, 'crm_messenger', () => {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS chat_threads(
+        id INTEGER PRIMARY KEY,
+        name TEXT NOT NULL DEFAULT '',
+        kind TEXT NOT NULL CHECK(kind IN ('direct', 'group')),
+        created_by INTEGER NOT NULL REFERENCES users(id),
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS chat_members(
+        thread_id INTEGER NOT NULL REFERENCES chat_threads(id) ON DELETE CASCADE,
+        user_id INTEGER NOT NULL REFERENCES users(id),
+        joined_at TEXT NOT NULL,
+        last_read_message_id INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY(thread_id, user_id)
+      );
+      CREATE TABLE IF NOT EXISTS chat_messages(
+        id INTEGER PRIMARY KEY,
+        thread_id INTEGER NOT NULL REFERENCES chat_threads(id) ON DELETE CASCADE,
+        sender_id INTEGER NOT NULL REFERENCES users(id),
+        body TEXT NOT NULL,
+        created_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_chat_members_user ON chat_members(user_id, thread_id);
+      CREATE INDEX IF NOT EXISTS idx_chat_messages_thread ON chat_messages(thread_id, id);
+      CREATE INDEX IF NOT EXISTS idx_chat_threads_updated ON chat_threads(updated_at DESC);
+      PRAGMA optimize;
+    `)
+  })
 }

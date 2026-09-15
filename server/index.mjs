@@ -283,6 +283,41 @@ function currentUser(request) {
   `, tokenHash(token), Date.now())
 }
 
+function chatThreadForUser(value, user) {
+  const thread = one(`
+    SELECT t.*, m.last_read_message_id
+    FROM chat_threads t
+    JOIN chat_members m ON m.thread_id = t.id
+    WHERE t.id = ? AND m.user_id = ?
+  `, validId(value), user.id)
+  if (!thread) fail('Nie masz dostępu do tej rozmowy.', 403)
+  return thread
+}
+
+function chatThreadsFor(user) {
+  return all(`
+    SELECT
+      t.id, t.name, t.kind, t.updated_at, m.last_read_message_id,
+      (SELECT body FROM chat_messages WHERE thread_id = t.id ORDER BY id DESC LIMIT 1) AS last_message,
+      (SELECT created_at FROM chat_messages WHERE thread_id = t.id ORDER BY id DESC LIMIT 1) AS last_message_at,
+      (SELECT COUNT(*) FROM chat_messages
+        WHERE thread_id = t.id AND id > m.last_read_message_id AND sender_id <> ?) AS unread_count
+    FROM chat_threads t
+    JOIN chat_members m ON m.thread_id = t.id
+    WHERE m.user_id = ?
+    ORDER BY COALESCE(last_message_at, t.updated_at) DESC, t.id DESC
+  `, user.id, user.id).map((thread) => ({
+    ...thread,
+    participants: all(`
+      SELECT u.id, u.name, u.role, u.active
+      FROM chat_members member
+      JOIN users u ON u.id = member.user_id
+      WHERE member.thread_id = ?
+      ORDER BY u.name
+    `, thread.id),
+  }))
+}
+
 function stateFor(user) {
   materializeRecurringTasks(db, notify)
   const companies = user.role === 'admin'
@@ -347,6 +382,7 @@ function stateFor(user) {
     leaveTypes: LEAVE_TYPES,
     events: all('SELECT * FROM events ORDER BY date, time, id'),
     activity: all('SELECT * FROM activity WHERE user_id = ? ORDER BY id DESC LIMIT 250', user.id),
+    chats: chatThreadsFor(user),
   }
 }
 
@@ -359,7 +395,7 @@ async function handleApi(request, response, path) {
   }
 
   if (path === '/api/health' && method === 'GET') {
-    return { ok: true, database: true, version: 4 }
+    return { ok: true, database: true, version: 5 }
   }
   if (path === '/api/auth/status' && method === 'GET') {
     return {
@@ -416,6 +452,114 @@ async function handleApi(request, response, path) {
 
   if (path === '/api/state' && method === 'GET') return stateFor(user)
 
+  let match
+
+  if (path === '/api/chat/threads' && method === 'POST') {
+    const requestedMembers = Array.isArray(data.memberIds) ? data.memberIds : [data.memberId]
+    const memberIds = [...new Set(requestedMembers.map((value) => validId(value)))]
+      .filter((id) => id !== user.id)
+    if (!memberIds.length) fail('Wybierz co najmniej jednego rozmówcę.')
+    const participants = memberIds.map((id) => activeUser(id))
+    const kind = memberIds.length === 1 && !text(data.name) ? 'direct' : 'group'
+
+    if (kind === 'direct') {
+      const existing = one(`
+        SELECT t.id
+        FROM chat_threads t
+        JOIN chat_members first ON first.thread_id = t.id AND first.user_id = ?
+        JOIN chat_members second ON second.thread_id = t.id AND second.user_id = ?
+        WHERE t.kind = 'direct'
+          AND (SELECT COUNT(*) FROM chat_members WHERE thread_id = t.id) = 2
+        LIMIT 1
+      `, user.id, memberIds[0])
+      if (existing) return { ok: true, threadId: existing.id }
+    }
+
+    const name = kind === 'group'
+      ? required(data.name, 'nazwa rozmowy grupowej', 80)
+      : ''
+    const createdAt = timestamp()
+    const created = transaction(() => {
+      const result = run(`
+        INSERT INTO chat_threads(name, kind, created_by, created_at, updated_at)
+        VALUES(?, ?, ?, ?, ?)
+      `, name, kind, user.id, createdAt, createdAt)
+      const threadId = Number(result.lastInsertRowid)
+      for (const participantId of [user.id, ...participants.map((person) => person.id)]) {
+        run(`
+          INSERT INTO chat_members(thread_id, user_id, joined_at, last_read_message_id)
+          VALUES(?, ?, ?, 0)
+        `, threadId, participantId, createdAt)
+      }
+      return threadId
+    })
+    return { ok: true, threadId: created }
+  }
+
+  if ((match = path.match(/^\/api\/chat\/threads\/(\d+)\/messages$/)) && method === 'GET') {
+    const thread = chatThreadForUser(match[1], user)
+    return {
+      messages: all(`
+        SELECT message.id, message.thread_id, message.sender_id, sender.name AS sender_name,
+               message.body, message.created_at
+        FROM chat_messages message
+        JOIN users sender ON sender.id = message.sender_id
+        WHERE message.thread_id = ?
+        ORDER BY message.id DESC
+        LIMIT 300
+      `, thread.id).reverse(),
+    }
+  }
+
+  if ((match = path.match(/^\/api\/chat\/threads\/(\d+)\/messages$/)) && method === 'POST') {
+    const thread = chatThreadForUser(match[1], user)
+    const body = required(data.body, 'treść wiadomości', 4000)
+    const sentAt = timestamp()
+    const messageId = transaction(() => {
+      const result = run(`
+        INSERT INTO chat_messages(thread_id, sender_id, body, created_at)
+        VALUES(?, ?, ?, ?)
+      `, thread.id, user.id, body, sentAt)
+      const id = Number(result.lastInsertRowid)
+      run('UPDATE chat_threads SET updated_at = ? WHERE id = ?', sentAt, thread.id)
+      run(`
+        UPDATE chat_members SET last_read_message_id = ?
+        WHERE thread_id = ? AND user_id = ?
+      `, id, thread.id, user.id)
+      const recipients = all(`
+        SELECT user_id FROM chat_members WHERE thread_id = ? AND user_id <> ?
+      `, thread.id, user.id).map((member) => member.user_id)
+      notifyPeople(recipients, user.name, {
+        message: `${user.name}: ${body.slice(0, 140)}`,
+        kind: 'chat',
+        importance: 'high',
+        targetPath: 'chat',
+        dedupeKey: `chat:${thread.id}:${id}`,
+      }, user.id)
+      return id
+    })
+    return { ok: true, messageId }
+  }
+
+  if ((match = path.match(/^\/api\/chat\/threads\/(\d+)\/read$/)) && method === 'POST') {
+    const thread = chatThreadForUser(match[1], user)
+    const lastMessage = one(
+      'SELECT COALESCE(MAX(id), 0) AS id FROM chat_messages WHERE thread_id = ?',
+      thread.id,
+    ).id
+    transaction(() => {
+      run(`
+        UPDATE chat_members SET last_read_message_id = ?
+        WHERE thread_id = ? AND user_id = ?
+      `, lastMessage, thread.id, user.id)
+      run(`
+        UPDATE activity SET seen = 1
+        WHERE user_id = ? AND kind = 'chat' AND dedupe_key LIKE ?
+      `, user.id, `chat:${thread.id}:%`)
+    })
+    return { ok: true }
+  }
+
   if (path === '/api/users' && method === 'POST') {
     requireAdmin(user)
     const name = required(data.name, 'imię i nazwisko')
@@ -427,7 +571,6 @@ async function handleApi(request, response, path) {
     return { ok: true }
   }
 
-  let match
   if ((match = path.match(/^\/api\/users\/(\d+)$/)) && method === 'PATCH') {
     requireAdmin(user)
     const target = one('SELECT * FROM users WHERE id = ?', validId(match[1]))
