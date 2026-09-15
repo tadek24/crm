@@ -61,7 +61,11 @@ function AuthScreen({
           <h1>Dobry dzień<br />zaczyna się<br />od porządku.</h1>
           <p>Firmy, zadania i ludzie.<br />Wspólna przestrzeń do codziennej pracy.</p>
         </div>
-        <span>CRM działa niezależnie od komunikatora</span>
+        <div className="auth-ambient" aria-hidden="true">
+          <span />
+          <span />
+          <span />
+        </div>
       </section>
       <section className="auth-panel">
         <form onSubmit={submit}>
