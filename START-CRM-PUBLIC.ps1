@@ -5,6 +5,7 @@ $credentialsFile = Join-Path $appRoot 'secrets\eprom-crm.json'
 $configFile = Join-Path $appRoot 'cloudflared.host.yml'
 $cloudflared = Join-Path $appRoot 'tools\cloudflared.exe'
 $healthUrl = 'http://127.0.0.1:4320/api/health'
+$publicHealthUrl = 'https://crm.webspanner.pl/api/health'
 
 if (-not (Test-Path -LiteralPath $credentialsFile)) {
   throw 'Brakuje prywatnego pliku secrets\eprom-crm.json.'
@@ -22,6 +23,30 @@ if (-not (Test-Path -LiteralPath (Join-Path $appRoot 'dist\index.html'))) {
     & npm.cmd run build
   } finally {
     Pop-Location
+  }
+}
+
+try {
+  $publicResponse = Invoke-RestMethod -Uri $publicHealthUrl -TimeoutSec 8
+  if ($publicResponse.ok) {
+    Write-Host 'CRM jest juz uruchomiony: https://crm.webspanner.pl'
+    exit 0
+  }
+} catch {
+  # Publiczny adres nie odpowiada, wiec skrypt kontynuuje uruchamianie.
+}
+
+$localReady = $false
+$listener = Get-NetTCPConnection -LocalPort 4320 -State Listen -ErrorAction SilentlyContinue
+if ($null -ne $listener) {
+  try {
+    $localResponse = Invoke-RestMethod -Uri $healthUrl -TimeoutSec 3
+    $localReady = [bool]$localResponse.ok
+  } catch {
+    $localReady = $false
+  }
+  if (-not $localReady) {
+    throw 'Port 127.0.0.1:4320 jest zajety przez inny program.'
   }
 }
 
@@ -47,11 +72,15 @@ $env:CRM_TIMEZONE = 'Europe/Warsaw'
 
 $server = $null
 try {
-  $server = Start-Process -FilePath (Get-Command node.exe).Source `
-    -ArgumentList 'server/index.mjs' `
-    -WorkingDirectory $appRoot `
-    -WindowStyle Hidden `
-    -PassThru
+  if (-not $localReady) {
+    $server = Start-Process -FilePath (Get-Command node.exe).Source `
+      -ArgumentList 'server/index.mjs' `
+      -WorkingDirectory $appRoot `
+      -WindowStyle Hidden `
+      -PassThru
+  } else {
+    Write-Host 'Lokalny serwer CRM jest juz uruchomiony.'
+  }
 
   $healthy = $false
   for ($attempt = 0; $attempt -lt 30; $attempt++) {
