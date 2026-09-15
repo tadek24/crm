@@ -99,6 +99,33 @@ export type Activity = {
   target_path: string
 }
 
+export type ChatParticipant = {
+  id: number
+  name: string
+  role: Role
+  active: number
+}
+
+export type ChatThread = {
+  id: number
+  name: string
+  kind: 'direct' | 'group'
+  updated_at: string
+  last_message: string | null
+  last_message_at: string | null
+  unread_count: number
+  participants: ChatParticipant[]
+}
+
+export type ChatMessage = {
+  id: number
+  thread_id: number
+  sender_id: number
+  sender_name: string
+  body: string
+  created_at: string
+}
+
 export type CrmState = {
   user: Person
   users: Person[]
@@ -110,4 +137,5 @@ export type CrmState = {
   leaveTypes: string[]
   events: CalendarEvent[]
   activity: Activity[]
+  chats: ChatThread[]
 }

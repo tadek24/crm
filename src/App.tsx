@@ -1,10 +1,10 @@
 import { useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from 'react'
 import { api, ApiError } from './api'
 import { EntityEditor, TaskDetails, type EditorState } from './forms'
-import type { Activity, CalendarEvent, Company, CrmState, DailyPlan, Leave, Person, Task } from './types'
+import type { Activity, CalendarEvent, ChatMessage, ChatThread, Company, CrmState, DailyPlan, Leave, Person, Task } from './types'
 import { Badge, Empty, Icon, Search, formatDate, formatDateTime, initials, localToday } from './ui'
 
-type Page = 'home' | 'day' | 'companies' | 'tasks' | 'leaves' | 'calendar' | 'team' | 'activity'
+type Page = 'home' | 'day' | 'companies' | 'tasks' | 'leaves' | 'calendar' | 'team' | 'chat' | 'activity'
 
 const roleNames = {
   admin: 'Administrator',
@@ -30,7 +30,13 @@ const pageDescriptions: Record<Page, string> = {
   leaves: 'Wnioski, rodzaje nieobecności i decyzje przełożonych.',
   calendar: 'Wydarzenia, terminy zadań i zaakceptowane urlopy.',
   team: 'Rangi, odpowiedzialność i dostęp do firmowej przestrzeni.',
+  chat: 'Rozmowy indywidualne i grupowe całego zespołu.',
   activity: 'Zmiany wymagające Twojej uwagi.',
+}
+
+function chatTitle(thread: ChatThread, userId: number) {
+  if (thread.kind === 'group') return thread.name
+  return thread.participants.filter((person) => person.id !== userId).map((person) => person.name).join(', ') || 'Rozmowa'
 }
 
 function addMonths(month: string, step: number) {
@@ -81,14 +87,19 @@ function AuthScreen({
                 <label>Kod uruchomieniowy<input type="password" name="setupToken" required autoComplete="off" /></label>
               )}
               {setup && <small>Hasło musi mieć minimum 12 znaków.</small>}
-              <button className="primary full" disabled={busy}>
-                {busy ? 'Proszę czekać…' : setup ? 'Utwórz przestrzeń' : 'Zaloguj się'}
-                <Icon name="arrow" />
+              <button className={`primary full login-button ${busy ? 'loading' : ''}`} disabled={busy}>
+                {busy ? <><span className="button-spinner" />Otwieramy CRM…</> : <>{setup ? 'Utwórz przestrzeń' : 'Zaloguj się'}<Icon name="arrow" /></>}
               </button>
             </>
           )}
           {error && <p className="error" role="alert">{error}</p>}
         </form>
+        {busy && (
+          <div className="login-progress" role="status" aria-live="polite">
+            <span className="login-progress-mark">e</span>
+            <div><strong>Otwieramy Twoją przestrzeń</strong><span className="login-progress-dots"><i /><i /><i /></span></div>
+          </div>
+        )}
       </section>
     </div>
   )
@@ -115,7 +126,7 @@ function PageHeading({
 }) {
   const title = page === 'home'
     ? `Cześć, ${name.split(' ')[0]}.`
-    : navigation.find(([id]) => id === page)?.[1] || 'Aktualizacje'
+    : page === 'chat' ? 'Komunikator' : navigation.find(([id]) => id === page)?.[1] || 'Aktualizacje'
   return (
     <div className="page-heading">
       <div>
@@ -742,6 +753,210 @@ function TeamPage({
   )
 }
 
+function ChatPage({
+  state,
+  activeId,
+  setActiveId,
+  refresh,
+}: {
+  state: CrmState
+  activeId: number | null
+  setActiveId: (id: number | null) => void
+  refresh: (silent?: boolean) => Promise<void>
+}) {
+  const [messages, setMessages] = useState<ChatMessage[]>([])
+  const [draft, setDraft] = useState('')
+  const [creating, setCreating] = useState(false)
+  const [groupMode, setGroupMode] = useState(false)
+  const [groupName, setGroupName] = useState('')
+  const [selectedPeople, setSelectedPeople] = useState<number[]>([])
+  const [working, setWorking] = useState(false)
+  const [chatError, setChatError] = useState('')
+  const endRef = useRef<HTMLDivElement | null>(null)
+  const active = state.chats.find((thread) => thread.id === activeId) || null
+  const contacts = state.users.filter((person) => person.active && person.id !== state.user.id)
+
+  useEffect(() => {
+    if (!activeId && state.chats[0]) setActiveId(state.chats[0].id)
+    if (activeId && !state.chats.some((thread) => thread.id === activeId)) setActiveId(state.chats[0]?.id || null)
+  }, [activeId, setActiveId, state.chats])
+
+  useEffect(() => {
+    if (!activeId) {
+      setMessages([])
+      return
+    }
+    let alive = true
+    async function receive() {
+      try {
+        const result = await api<{ messages: ChatMessage[] }>(`/chat/threads/${activeId}/messages`)
+        if (!alive) return
+        setMessages(result.messages)
+        await api(`/chat/threads/${activeId}/read`, 'POST', {})
+        if (alive) await refresh(true)
+      } catch (caught) {
+        if (alive) setChatError(caught instanceof Error ? caught.message : 'Nie udało się pobrać wiadomości.')
+      }
+    }
+    void receive()
+    const timer = window.setInterval(() => void receive(), 4_000)
+    return () => {
+      alive = false
+      window.clearInterval(timer)
+    }
+  }, [activeId])
+
+  useEffect(() => {
+    endRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' })
+  }, [messages])
+
+  async function createConversation(payload: { memberId?: number; memberIds?: number[]; name?: string }) {
+    setWorking(true)
+    setChatError('')
+    try {
+      const result = await api<{ threadId: number }>('/chat/threads', 'POST', payload)
+      await refresh()
+      setActiveId(result.threadId)
+      setCreating(false)
+      setSelectedPeople([])
+      setGroupName('')
+    } catch (caught) {
+      setChatError(caught instanceof Error ? caught.message : 'Nie udało się rozpocząć rozmowy.')
+    } finally {
+      setWorking(false)
+    }
+  }
+
+  async function send(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    if (!activeId || !draft.trim()) return
+    const body = draft
+    setDraft('')
+    setWorking(true)
+    setChatError('')
+    try {
+      await api(`/chat/threads/${activeId}/messages`, 'POST', { body })
+      const result = await api<{ messages: ChatMessage[] }>(`/chat/threads/${activeId}/messages`)
+      setMessages(result.messages)
+      await refresh(true)
+    } catch (caught) {
+      setDraft(body)
+      setChatError(caught instanceof Error ? caught.message : 'Nie udało się wysłać wiadomości.')
+    } finally {
+      setWorking(false)
+    }
+  }
+
+  function enableDeviceNotifications() {
+    if ('Notification' in window && Notification.permission === 'default') void Notification.requestPermission()
+  }
+
+  return (
+    <section className="chat-shell">
+      <aside className="chat-list">
+        <div className="chat-list-heading">
+          <div><h2>Rozmowy</h2><p>{state.chats.length ? `${state.chats.length} aktywnych` : 'Zacznij pierwszą rozmowę'}</p></div>
+          <button className="chat-new-button" aria-label="Nowa rozmowa" onClick={() => setCreating((value) => !value)}><Icon name={creating ? 'close' : 'plus'} /></button>
+        </div>
+        {creating && (
+          <div className="chat-create">
+            <div className="chat-create-tabs">
+              <button className={!groupMode ? 'chosen' : ''} onClick={() => setGroupMode(false)}>1:1</button>
+              <button className={groupMode ? 'chosen' : ''} onClick={() => setGroupMode(true)}>Grupa</button>
+            </div>
+            {groupMode ? (
+              <>
+                <input aria-label="Nazwa grupy" placeholder="Nazwa rozmowy" value={groupName} onChange={(event) => setGroupName(event.target.value)} />
+                <div className="chat-contact-list">
+                  {contacts.map((person) => (
+                    <label className="chat-contact check" key={person.id}>
+                      <input type="checkbox" checked={selectedPeople.includes(person.id)} onChange={() => setSelectedPeople((current) => current.includes(person.id) ? current.filter((id) => id !== person.id) : [...current, person.id])} />
+                      <span className="avatar tiny">{initials(person.name)}</span><strong>{person.name}</strong>
+                    </label>
+                  ))}
+                </div>
+                <button className="primary full" disabled={working || !groupName.trim() || !selectedPeople.length} onClick={() => void createConversation({ name: groupName, memberIds: selectedPeople })}>Utwórz grupę</button>
+              </>
+            ) : (
+              <div className="chat-contact-list">
+                {contacts.map((person) => (
+                  <button className="chat-contact" disabled={working} key={person.id} onClick={() => void createConversation({ memberId: person.id })}>
+                    <span className="avatar tiny">{initials(person.name)}</span><span><strong>{person.name}</strong><small>{roleNames[person.role]}</small></span>
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+        <div className="chat-threads">
+          {state.chats.map((thread) => (
+            <button className={`chat-thread ${thread.id === activeId ? 'active' : ''}`} key={thread.id} onClick={() => setActiveId(thread.id)}>
+              <span className="avatar">{initials(chatTitle(thread, state.user.id))}</span>
+              <span className="grow"><strong>{chatTitle(thread, state.user.id)}</strong><small>{thread.last_message || (thread.kind === 'group' ? 'Rozmowa grupowa' : 'Nowa rozmowa')}</small></span>
+              <span className="chat-thread-meta"><small>{thread.last_message_at ? new Date(thread.last_message_at).toLocaleTimeString('pl-PL', { hour: '2-digit', minute: '2-digit' }) : ''}</small>{thread.unread_count > 0 && <i>{thread.unread_count}</i>}</span>
+            </button>
+          ))}
+          {!state.chats.length && !creating && <Empty icon="chat" title="Tu pojawią się rozmowy" text="Kliknij plus, aby napisać do pracownika lub utworzyć grupę." />}
+        </div>
+      </aside>
+      <div className="chat-room">
+        {active ? (
+          <>
+            <header className="chat-room-heading">
+              <span className="avatar">{initials(chatTitle(active, state.user.id))}</span>
+              <div className="grow"><h2>{chatTitle(active, state.user.id)}</h2><p>{active.kind === 'group' ? `${active.participants.length} osoby` : 'Rozmowa prywatna w CRM'}</p></div>
+              {'Notification' in window && Notification.permission !== 'granted' && <button className="secondary device-notifications" onClick={enableDeviceNotifications}><Icon name="bell" />Powiadomienia na urządzeniu</button>}
+            </header>
+            <div className="chat-messages" aria-live="polite">
+              {!messages.length && <Empty icon="chat" title="Napisz pierwszą wiadomość" text="Wiadomości w tej rozmowie są przechowywane wyłącznie w CRM." />}
+              {messages.map((message, index) => {
+                const mine = message.sender_id === state.user.id
+                const showAvatar = !mine && messages[index - 1]?.sender_id !== message.sender_id
+                return (
+                  <div className={`chat-message-row ${mine ? 'mine' : ''}`} key={message.id}>
+                    {!mine && (showAvatar ? <span className="avatar tiny">{initials(message.sender_name)}</span> : <span className="avatar-spacer" />)}
+                    <div className="chat-message">
+                      {!mine && showAvatar && <strong>{message.sender_name}</strong>}
+                      <p>{message.body}</p>
+                      <time>{new Date(message.created_at).toLocaleString('pl-PL', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' })}</time>
+                    </div>
+                  </div>
+                )
+              })}
+              <div ref={endRef} />
+            </div>
+            <form className="chat-composer" onSubmit={send}>
+              <textarea rows={1} value={draft} onChange={(event) => setDraft(event.target.value)} placeholder="Napisz wiadomość…" maxLength={4000} onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); event.currentTarget.form?.requestSubmit() } }} />
+              <button className="primary" disabled={working || !draft.trim()} aria-label="Wyślij wiadomość"><Icon name="arrow" />Wyślij</button>
+            </form>
+          </>
+        ) : <Empty icon="chat" title="Wybierz rozmowę" text="Możesz pisać prywatnie lub utworzyć rozmowę grupową dla zespołu." />}
+        {chatError && <p className="error chat-error" role="alert">{chatError}</p>}
+      </div>
+    </section>
+  )
+}
+
+function ChatHeads({
+  state,
+  open,
+}: {
+  state: CrmState
+  open: (id: number | null) => void
+}) {
+  const unread = state.chats.filter((thread) => thread.unread_count > 0).slice(0, 3)
+  return (
+    <div className="chat-heads" aria-label="Szybki dostęp do komunikatora">
+      {unread.map((thread) => (
+        <button className="chat-head unread" key={thread.id} title={`${chatTitle(thread, state.user.id)}: ${thread.last_message || 'Nowa wiadomość'}`} onClick={() => open(thread.id)}>
+          <span>{initials(chatTitle(thread, state.user.id))}</span><i>{thread.unread_count}</i>
+        </button>
+      ))}
+      <button className="chat-head launcher" aria-label="Otwórz komunikator" onClick={() => open(null)}><Icon name="chat" />{unread.length > 0 && <i>{unread.reduce((sum, thread) => sum + thread.unread_count, 0)}</i>}</button>
+    </div>
+  )
+}
+
 function ActivityPage({
   state,
   busy,
@@ -762,7 +977,7 @@ function ActivityPage({
       </div>
       {state.activity.length ? state.activity.map((activity) => (
         <button className={`activity-card ${activity.seen ? '' : 'unread'} ${activity.importance === 'high' ? 'important' : ''}`} key={activity.id} onClick={() => open(activity)}>
-          <span className={`activity-icon ${activity.kind}`}><Icon name={activity.kind === 'leave' ? 'leaves' : activity.kind === 'task' ? 'tasks' : activity.kind === 'event' ? 'calendar' : activity.kind === 'access' ? 'team' : 'companies'} /></span>
+          <span className={`activity-icon ${activity.kind}`}><Icon name={activity.kind === 'leave' ? 'leaves' : activity.kind === 'task' ? 'tasks' : activity.kind === 'event' ? 'calendar' : activity.kind === 'access' ? 'team' : activity.kind === 'chat' ? 'chat' : 'companies'} /></span>
           <div className="grow"><strong>{activity.message}</strong><span>{activity.actor} · {formatDateTime(activity.created)}</span></div>
           {!activity.seen && <span className="new-label">NOWE</span>}
           <Icon name="arrow" />
@@ -787,17 +1002,28 @@ export default function App() {
   const [preselectedTask, setPreselectedTask] = useState<number | null>(null)
   const [editor, setEditor] = useState<EditorState | null>(null)
   const [month, setMonth] = useState(localToday().slice(0, 7))
+  const [activeChatId, setActiveChatId] = useState<number | null>(null)
   const previousUnread = useRef<number | null>(null)
+  const previousChatUnread = useRef<number | null>(null)
   const firstLoad = useRef(true)
 
   async function load(silent = false) {
     try {
       const next = await api<CrmState>('/state')
       const unread = next.activity.filter((entry) => !entry.seen)
-      if (silent && previousUnread.current !== null && unread.length > previousUnread.current && unread[0]) {
+      const chatUnread = next.chats.reduce((sum, thread) => sum + thread.unread_count, 0)
+      const newestChat = next.chats.find((thread) => thread.unread_count > 0)
+      const hasNewChat = silent && previousChatUnread.current !== null && chatUnread > previousChatUnread.current && newestChat
+      if (hasNewChat) {
+        setToast(`Nowa wiadomość od ${chatTitle(newestChat, next.user.id)}.`)
+        if ('Notification' in window && Notification.permission === 'granted') {
+          new Notification(`Wiadomość od ${chatTitle(newestChat, next.user.id)}`, { body: newestChat.last_message || 'Masz nową wiadomość w CRM.' })
+        }
+      } else if (silent && previousUnread.current !== null && unread.length > previousUnread.current && unread[0]) {
         setToast(unread[0].message)
       }
       previousUnread.current = unread.length
+      previousChatUnread.current = chatUnread
       setState(next)
       setSetup(false)
       setError('')
@@ -824,9 +1050,11 @@ export default function App() {
   }, [])
 
   useEffect(() => {
-    const unread = state?.activity.filter((entry) => !entry.seen).length || 0
+    const activityUnread = state?.activity.filter((entry) => !entry.seen).length || 0
+    const chatUnread = state?.chats.reduce((sum, thread) => sum + thread.unread_count, 0) || 0
+    const unread = Math.max(activityUnread, chatUnread)
     document.title = unread ? `(${unread}) eprom — CRM` : 'eprom — CRM'
-  }, [state?.activity])
+  }, [state?.activity, state?.chats])
 
   useEffect(() => {
     if (!toast) return
@@ -853,8 +1081,20 @@ export default function App() {
   async function login(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
     const data = Object.fromEntries(new FormData(event.currentTarget))
-    if (await mutate(setup ? '/auth/setup' : '/auth/login', 'POST', data, 'Witaj w CRM.')) {
+    setBusy(true)
+    setError('')
+    try {
+      await Promise.all([
+        api(setup ? '/auth/setup' : '/auth/login', 'POST', data),
+        new Promise((resolve) => window.setTimeout(resolve, 900)),
+      ])
+      await load()
       setSetup(false)
+      setToast('Witaj w CRM.')
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : 'Nie udało się zalogować.')
+    } finally {
+      setBusy(false)
     }
   }
 
@@ -872,6 +1112,7 @@ export default function App() {
   const isAdmin = state.user.role === 'admin'
   const isManager = state.user.role !== 'employee'
   const unread = state.activity.filter((entry) => !entry.seen)
+  const unreadChats = state.chats.reduce((sum, thread) => sum + thread.unread_count, 0)
   const action: Partial<Record<Page, ReactNode>> = {
     companies: isAdmin && <button className="primary" onClick={() => setEditor({ kind: 'company' })}><Icon name="plus" />Dodaj firmę</button>,
     tasks: isAdmin && <button className="primary" onClick={() => setEditor({ kind: 'task' })}><Icon name="plus" />Nowe zadanie</button>,
@@ -882,7 +1123,7 @@ export default function App() {
 
   async function openActivity(activity: Activity) {
     if (!activity.seen) await mutate(`/activity/${activity.id}/read`, 'POST', {}, '')
-    if (navigation.some(([id]) => id === activity.target_path) || activity.target_path === 'activity') {
+    if (navigation.some(([id]) => id === activity.target_path) || ['activity', 'chat'].includes(activity.target_path)) {
       go(activity.target_path as Page)
     }
   }
@@ -892,22 +1133,24 @@ export default function App() {
       <aside className="sidebar">
         <button className="brand-button" onClick={() => go('home')}><Brand /></button>
         <div className="workspace-label"><span>E</span><div><strong>Przestrzeń firmowa</strong><small>Twój zespół w jednym miejscu</small></div></div>
-        <span className="nav-caption">PRZESTRZEŃ PRACY</span>
-        <nav>
-          {navigation.map(([id, label]) => (
-            <button className={page === id ? 'active' : ''} key={id} onClick={() => go(id)}>
-              <Icon name={id} />
-              <span>{label}</span>
-              {id === 'tasks' && state.tasks.filter((task) => task.status !== 'Gotowe').length > 0 && <i>{state.tasks.filter((task) => task.status !== 'Gotowe').length}</i>}
-            </button>
-          ))}
-        </nav>
-        <div className="nav-divider" />
-        <span className="nav-caption">KOMUNIKACJA</span>
-        <nav>
-          <button className="disabled-feature" title="Komunikator pozostaje całkowicie oddzielny" disabled><Icon name="chat" /><span>Komunikator</span><small>osobno</small></button>
-          <button className={page === 'activity' ? 'active notifications' : 'notifications'} onClick={() => go('activity')}><Icon name="bell" /><span>Aktualizacje</span>{unread.length > 0 && <i className="urgent">{unread.length}</i>}</button>
-        </nav>
+        <div className="sidebar-navigation">
+          <span className="nav-caption">PRZESTRZEŃ PRACY</span>
+          <nav>
+            {navigation.map(([id, label]) => (
+              <button className={page === id ? 'active' : ''} key={id} onClick={() => go(id)}>
+                <Icon name={id} />
+                <span>{label}</span>
+                {id === 'tasks' && state.tasks.filter((task) => task.status !== 'Gotowe').length > 0 && <i>{state.tasks.filter((task) => task.status !== 'Gotowe').length}</i>}
+              </button>
+            ))}
+          </nav>
+          <div className="nav-divider" />
+          <span className="nav-caption">KOMUNIKACJA</span>
+          <nav>
+            <button className={page === 'chat' ? 'active notifications' : 'notifications'} onClick={() => go('chat')}><Icon name="chat" /><span>Komunikator</span>{unreadChats > 0 && <i className="urgent">{unreadChats}</i>}</button>
+            <button className={page === 'activity' ? 'active notifications' : 'notifications'} onClick={() => go('activity')}><Icon name="bell" /><span>Aktualizacje</span>{unread.length > 0 && <i className="urgent">{unread.length}</i>}</button>
+          </nav>
+        </div>
         <div className="sidebar-account">
           <span className="avatar">{initials(state.user.name)}</span>
           <div><strong>{state.user.name}</strong><small>{roleNames[state.user.role]}</small></div>
@@ -916,7 +1159,7 @@ export default function App() {
       </aside>
       <div className="main">
         <header className="topbar">
-          <span>Przestrzeń firmowa <b>/</b> <strong>{navigation.find(([id]) => id === page)?.[1] || 'Aktualizacje'}</strong></span>
+          <span>Przestrzeń firmowa <b>/</b> <strong>{page === 'chat' ? 'Komunikator' : navigation.find(([id]) => id === page)?.[1] || 'Aktualizacje'}</strong></span>
           <div><button className="top-notification" aria-label={`${unread.length} nowych aktualizacji`} onClick={() => go('activity')}><Icon name="bell" />{unread.length > 0 && <span>{unread.length}</span>}</button><span className="avatar small">{initials(state.user.name)}</span></div>
         </header>
         <main className="content">
@@ -930,12 +1173,14 @@ export default function App() {
           {page === 'leaves' && <LeavesPage state={state} month={month} setMonth={setMonth} busy={busy} update={mutate} />}
           {page === 'calendar' && <CalendarPage state={state} month={month} setMonth={setMonth} busy={busy} update={mutate} />}
           {page === 'team' && <TeamPage state={state} query={query} setQuery={setQuery} busy={busy} update={mutate} />}
+          {page === 'chat' && <ChatPage state={state} activeId={activeChatId} setActiveId={setActiveChatId} refresh={load} />}
           {page === 'activity' && <ActivityPage state={state} busy={busy} open={openActivity} readAll={() => void mutate('/activity/read', 'POST', {}, 'Wszystkie aktualizacje są przeczytane.')} />}
           <footer><span>eprom / workspace</span><span>Porządek w pracy. Przestrzeń dla ludzi.</span></footer>
         </main>
       </div>
       {editor && <EntityEditor modal={editor} state={state} busy={busy} error={error} close={() => { setEditor(null); setError('') }} save={mutate} />}
       {selectedTask && <TaskDetails task={selectedTask} state={state} close={() => setSelectedTask(null)} edit={() => { setEditor({ kind: 'task', item: selectedTask }); setSelectedTask(null) }} openDay={() => { setPreselectedTask(selectedTask.id); setSelectedTask(null); go('day') }} />}
+      <ChatHeads state={state} open={(id) => { setActiveChatId(id); go('chat') }} />
       {toast && <div className="toast" role="status"><Icon name="check" />{toast}</div>}
     </div>
   )
