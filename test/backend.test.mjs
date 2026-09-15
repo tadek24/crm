@@ -233,10 +233,12 @@ test('migracja zachowuje rekordy starej bazy i uzupełnia nowy schemat', async (
   try {
     assert.deepEqual(
       db.prepare('SELECT version FROM schema_migrations ORDER BY version').all().map(({ version }) => version),
-      [1, 2, 3, 4],
+      [1, 2, 3, 4, 5],
     )
     assert.ok(db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'task_series'").get())
     assert.ok(db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'daily_plan_items'").get())
+    assert.ok(db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'chat_threads'").get())
+    assert.ok(db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'chat_messages'").get())
   } finally {
     db.close()
   }
@@ -381,4 +383,40 @@ test('pracownik tworzy i zmienia własny plan, a inna osoba nie może go edytowa
   assert.equal(foreignEdit.status, 403)
   state = (await request(baseUrl, '/state', { cookie: employeeCookie })).data
   assert.equal(state.plans.find((item) => item.id === plan.id).status, 'W trakcie')
+})
+
+test('komunikator tworzy rozmowę, dostarcza wiadomość i zapisuje odczyt', async () => {
+  const created = await request(baseUrl, '/chat/threads', {
+    method: 'POST', cookie: adminCookie, data: { memberId: 3 },
+  })
+  assert.equal(created.status, 200, JSON.stringify(created.data))
+  assert.ok(created.data.threadId)
+
+  const sent = await request(baseUrl, `/chat/threads/${created.data.threadId}/messages`, {
+    method: 'POST', cookie: adminCookie, data: { body: 'Wiadomość testowa dla pracownika.' },
+  })
+  assert.equal(sent.status, 200, JSON.stringify(sent.data))
+
+  let employeeState = (await request(baseUrl, '/state', { cookie: employeeCookie })).data
+  const thread = employeeState.chats.find((item) => item.id === created.data.threadId)
+  assert.ok(thread)
+  assert.equal(thread.unread_count, 1)
+  assert.equal(thread.last_message, 'Wiadomość testowa dla pracownika.')
+
+  const messages = await request(baseUrl, `/chat/threads/${created.data.threadId}/messages`, {
+    cookie: employeeCookie,
+  })
+  assert.equal(messages.status, 200)
+  assert.equal(messages.data.messages.at(-1).body, 'Wiadomość testowa dla pracownika.')
+
+  assert.equal((await request(baseUrl, `/chat/threads/${created.data.threadId}/read`, {
+    method: 'POST', cookie: employeeCookie, data: {},
+  })).status, 200)
+  employeeState = (await request(baseUrl, '/state', { cookie: employeeCookie })).data
+  assert.equal(employeeState.chats.find((item) => item.id === created.data.threadId).unread_count, 0)
+
+  const outsider = await request(baseUrl, `/chat/threads/${created.data.threadId}/messages`, {
+    cookie: directorCookie,
+  })
+  assert.equal(outsider.status, 403)
 })
