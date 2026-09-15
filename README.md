@@ -1,8 +1,8 @@
 # EPROM CRM
 
-Samodzielny CRM dla zespołu: pracownicy i role, firmy, zadania pojedyncze i cykliczne, planer dnia, urlopy, kalendarz oraz widoczne powiadomienia.
+Samodzielny CRM dla zespołu: pracownicy i role, firmy, zadania pojedyncze i cykliczne, planer dnia, urlopy, kalendarz, widoczne powiadomienia oraz własny komunikator CRM z rozmowami prywatnymi i grupowymi.
 
-Projekt ma własny serwer, bazę SQLite i konfigurację wdrożenia. Nie korzysta z kodu, danych, serwera ani ustawień komunikatora.
+Projekt ma własny serwer, bazę SQLite i konfigurację wdrożenia. Nie korzysta z kodu, danych, serwera ani ustawień wcześniejszego komunikatora.
 
 ## Uruchomienie lokalne
 
@@ -41,6 +41,7 @@ Nie uruchamiaj jednocześnie wariantu natywnego i kontenera, ponieważ oba zapis
 - administrator zarządza pracownikami, rangami, firmami i zadaniami oraz rozpatruje wszystkie urlopy;
 - dyrektor rozpatruje urlopy innych osób;
 - pracownik widzi przypisane firmy i zadania, otrzymuje aktualizacje oraz układa własny plan dnia;
+- każdy aktywny pracownik może prowadzić rozmowy prywatne i grupowe w komunikatorze CRM;
 - rodzaj urlopu jest wymagany;
 - cykliczne zadania materializują kolejne terminy bez duplikatów;
 - firmy i zadania są archiwizowane, aby zachować historię.
@@ -53,7 +54,7 @@ npm run build
 docker compose config --quiet
 ```
 
-Testy obejmują migrację danych, uprawnienia urlopowe, rodzaje urlopu, serie cykliczne, strefę Europe/Warsaw i ochronę planów pracowników.
+Testy obejmują migrację danych, uprawnienia urlopowe, rodzaje urlopu, serie cykliczne, strefę Europe/Warsaw, ochronę planów pracowników oraz dostarczanie i odczyt wiadomości.
 
 ## Git i Vercel
 
